@@ -5,7 +5,7 @@ from joblib import Parallel, delayed
 
 import pandas as pd
 import numpy as np
-# import cdd
+import cdd
 import sys
 import signal
 import copy
@@ -13,20 +13,23 @@ import copy
 
 
 # Metadata
-num_process = 4
+num_process = 8
 
-parts = 100
-start_parts = 0
+parts = 1000
+
+start_parts = 0 # Should be 0 if not special circumstances
 
 max_time_per_poly = 10 # Set to 0 if no timeout is wanted
 
-max_dim_cdd = 0
+max_dim_cdd = 0 # No reason to check to big dimensions with cdd
 
 # Read the given data
 print("Trying to read the data. This can take some time. ")
 imset_list_read = eval(open(sys.argv[2], 'r').read())
 print("\tGot a list of "+str(len(imset_list_read))+" imsets")
 
+# Can probably be written to handle 'readfile != savefile',
+# but is to much work for no reason.
 readfile = sys.argv[1]
 savefile = sys.argv[1]
 
@@ -45,7 +48,7 @@ signal.signal(signal.SIGALRM, timeout_handler)
 
 
 
-# Definte the cdd wrapper to clean the code
+# Definte the cdd wrapper to have cleaner code.
 def adjacencies_list(mat):
     poly = cdd.Polyhedron(mat)
     # get the adjacent vertices of each vertex
@@ -124,29 +127,30 @@ def update_row(row, imset_list, dataframe, max_dim_cdd = max_dim_cdd):
     # If the quick verification is not possible, try to use 
     # the cdd algorithm if the dimension is low enough. We do
     # this with a timeout as to not get stuck in lenghty computations
-#    if row['dim'] < max_dim_cdd:
-#        try:
-#            # Run cdd with a timeout (in case computations take too long) 
-#            signal.alarm(max_time_per_poly)
-#            # TODO: check this next row some day
-#            adj_list = adjacencies_list(cdd.Matrix(temp_list))
-#            # Cancel the alarm if computations are done
-#            signal.alarm(0)
-#            # Return all new info
-#            ret = []
-#            for a in range(num_vert):
-#                for b in range(a+1, num_vert):
-#                    temp_list_a_vec_id = sum([temp_list[a][k]*3**k for k in range(len(temp_list[a]))])
-#                    temp_list_b_vec_id = sum([temp_list[b][k]*3**k for k in range(len(temp_list[b]))]) 
-#                    
-#                    if b in adj_list[a]:
-#                        ret.append((dataframe.loc[(dataframe['a_vec_id'] == temp_list_a_vec_id) & (dataframe['b_vec_id'] == temp_list_b_vec_id)].index[0], 1))
-#                    else:
-#                        for ind in dataframe.loc[(dataframe['a_vec_id'] == temp_list_a_vec_id) & (dataframe['b_vec_id'] == temp_list_b_vec_id) & (dataframe['edge'] == 0)].index:
-#                            ret.append((ind, -1))
-#            return ret
-#        except TimeoutException:
-#            pass
+    if row['dim'] < max_dim_cdd:
+        try:
+            # Run cdd with a timeout (in case computations take too long) 
+            signal.alarm(max_time_per_poly)
+            # TODO: check this next row some day
+            adj_list = adjacencies_list(cdd.Matrix(temp_list))
+            # Cancel the alarm if computations are done
+            signal.alarm(0)
+            # Return all new info
+            ret = []
+            for a in range(num_vert):
+                for b in range(a+1, num_vert):
+                    temp_list_a_vec_id = sum([temp_list[a][k]*3**k for k in range(len(temp_list[a]))])
+                    temp_list_b_vec_id = sum([temp_list[b][k]*3**k for k in range(len(temp_list[b]))]) 
+                    
+                    if b in adj_list[a]:
+                        ret.append((dataframe.loc[(dataframe['a_vec_id'] == temp_list_a_vec_id) & (dataframe['b_vec_id'] == temp_list_b_vec_id)].index[0], 1))
+                    else:
+                        for ind in dataframe.loc[(dataframe['a_vec_id'] == temp_list_a_vec_id) & (dataframe['b_vec_id'] == temp_list_b_vec_id) & (dataframe['edge'] == 0)].index:
+                            ret.append((ind, -1))
+            return ret
+        except TimeoutException:
+            # If the cdd timed out, do nothing.
+            pass
     # If we failed to either verify or not verify 
     # the edge, return 0.
     return [(row.name, 0)]
@@ -159,6 +163,8 @@ np_imset_list_read = [np.array(i) for i in imset_list_read]
 print("Starting first run. Current time: " + str(time.strftime("%H:%M:%S", time.localtime())))
 st_real = time.time()
 
+# Take care of some "trivial" cases. Namely if 'dim' <= 2 it is enough
+# to check the square condition to say whether or not the pair is and edge. 
 edge_df.loc[(edge_df['dim'] < 3) & (edge_df['edge'] == 0), 'edge'] = 1
 
 # This is done in parts and is written to file each time. Notice that
@@ -166,7 +172,6 @@ edge_df.loc[(edge_df['dim'] < 3) & (edge_df['edge'] == 0), 'edge'] = 1
 
 for part in range(start_parts, parts):
     print("\nStarting on part: " + str(part+1) + "/" + str(parts))
-#    ret = Parallel(n_jobs = num_process, require = 'sharedmem')(delayed(update_row)(row, imset_list_read, edge_df) for ind,row in edge_df[int(part * len_df/parts): int((part+1)*len_df/parts)].loc[edge_df['edge'] == 0].iterrows())
     ret = Parallel(n_jobs = num_process)(delayed(update_row)(row, np_imset_list_read, edge_df) for ind,row in edge_df[int(part * len_df/parts): int((part+1)*len_df/parts)].loc[edge_df['edge'] == 0].iterrows())
     info = list.join(ret)
     for ed in info:
@@ -175,8 +180,6 @@ for part in range(start_parts, parts):
     edge_df.to_csv(savefile, index = False)
     print("Part " + str(part+1) + " completed. Updated "+str(sum(1 for i in info if i[1] != 0))+" rows. Failed to do " +str(sum(1 for i in info if i[1] == 0))+ " rows. Current time: " +str(time.strftime("%H:%M:%S", time.localtime())))
     print("Time taken so far: ", time.time()-st_real)
-
-# ret = edge_df.apply(update_row, args=(edge_df,), axis=1)
 
 print("Program done. Time taken: ", time.time()-st_real)
 print("Current time: " + str(time.strftime("%H:%M:%S", time.localtime())))
